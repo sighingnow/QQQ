@@ -71,7 +71,10 @@ def prepare_data(tokenizer, calibrate_path, training_args, calibrate_num, max_le
                 desc="Running tokenizer on dataset",
             )
         cali_data.set_format(type="torch", columns=["input_ids", "attention_mask"])
-        cali_data.remove_columns(["meta", "text"])
+        if 'meta' in cali_data.column_names:
+            cali_data.remove_columns(["meta"])
+        if 'text' in cali_data.column_names:
+            cali_data.remove_columns(["text"])
     return cali_data
 
 
@@ -128,6 +131,8 @@ def smooth(model, tokenizer, q_config, args):
     model_type = get_model_architecture(model.config)
     if model_type == "llama":
         from .quantization import migration_llama as migration
+    elif model_type == "qwen2":
+        from .quantization import migration_qwen2 as migration
     else:
         raise NotImplementedError
     migration.set_search_class(args.smooth_method)

@@ -1,4 +1,5 @@
 from .quant_llama import QuantizedLlamaForCausalLM
+from .quant_qwen2 import QuantizedQwen2ForCausalLM
 from QQQ.smooth.quantization.observer import ObserverBase
 from QQQ.utils import prepare_for_inference
 

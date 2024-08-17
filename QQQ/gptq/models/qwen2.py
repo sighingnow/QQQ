@@ -11,6 +11,17 @@ from transformers.models.llama.modeling_llama import (
     LlamaRotaryEmbedding,
 )
 from transformers.models.llama.configuration_llama import LlamaConfig
+from transformers.models.qwen2.modeling_qwen2 import (
+    Qwen2RMSNorm,
+    Qwen2MLP,
+    Qwen2Attention,
+    Qwen2DecoderLayer,
+    Qwen2PreTrainedModel,
+    Qwen2Model,
+    Qwen2ForCausalLM,
+    Qwen2RotaryEmbedding,
+)
+from transformers.models.qwen2 import Qwen2Config
 from transformers.activations import ACT2FN
 from typing import Dict, Optional
 from ..qlinear import QuantLinear
@@ -24,7 +35,7 @@ logger = logging.get_logger(__name__)
 
 
 @torch.no_grad()
-def gptq_llama_func(model, dataloader, dev, args, force_to_cpu=False):
+def gptq_qwen2_func(model, dataloader, dev, args, force_to_cpu=False):
     print("Starting GPTQ quantization ...")
 
     use_cache = model.config.use_cache
@@ -36,11 +47,12 @@ def gptq_llama_func(model, dataloader, dev, args, force_to_cpu=False):
     layers[0] = layers[0].to(dev)
 
     dtype = next(iter(model.parameters())).dtype
-    inps = torch.zeros(
-        (args.nsamples, args.seqlen, model.config.hidden_size),
-        dtype=dtype,
-        device=dev,
-    )
+    inps = []
+    # inps = torch.zeros(
+    #     (1, args.seqlen, model.config.hidden_size),
+    #     dtype=dtype,
+    #     device=dev,
+    # )
     cache = {"i": 0, "attention_mask": None}
 
     class Catcher(nn.Module):
@@ -49,7 +61,8 @@ def gptq_llama_func(model, dataloader, dev, args, force_to_cpu=False):
             self.module = module
 
         def forward(self, inp, **kwargs):
-            inps[cache["i"]] = inp
+            # inps[cache["i"]] = inp
+            inps.append(inp.cpu())
             cache["i"] += 1
             cache["attention_mask"] = kwargs["attention_mask"]
             cache["position_ids"] = kwargs["position_ids"]
@@ -69,7 +82,8 @@ def gptq_llama_func(model, dataloader, dev, args, force_to_cpu=False):
         model.model.norm = model.model.norm.cpu()
         torch.cuda.empty_cache()
 
-    outs = torch.zeros_like(inps)
+    # outs = torch.zeros_like(inps)
+    outs = [None] * len(inps)
     attention_mask = cache["attention_mask"]
     position_ids = cache["position_ids"]
 
@@ -78,8 +92,8 @@ def gptq_llama_func(model, dataloader, dev, args, force_to_cpu=False):
         if layer.input_layernorm.weight.device == torch.device("cpu"):
             layer = layer.to(dev)
         cur_device = layer.input_layernorm.weight.device
-        inps.to(cur_device)
-        outs.to(cur_device)
+        # inps.to(cur_device)
+        # outs.to(cur_device)
         attention_mask.to(cur_device)
         position_ids.to(cur_device)
         
@@ -112,10 +126,10 @@ def gptq_llama_func(model, dataloader, dev, args, force_to_cpu=False):
                 handles.append(subset[name].register_forward_hook(add_batch(name)))
             for j in range(args.nsamples):
                 outs[j] = layer(
-                    inps[j].unsqueeze(0),
+                    inps[j].to(cur_device),
                     attention_mask=attention_mask,
                     position_ids=position_ids,
-                )[0]
+                )[0].cpu()
             for h in handles:
                 h.remove()
 
@@ -138,10 +152,10 @@ def gptq_llama_func(model, dataloader, dev, args, force_to_cpu=False):
 
         for j in range(args.nsamples):
             outs[j] = layer(
-                inps[j].unsqueeze(0),
+                inps[j].to(cur_device),
                 attention_mask=attention_mask,
                 position_ids=position_ids,
-            )[0]
+            )[0].cpu()
 
         if force_to_cpu:
             layers[i] = layer.cpu()
@@ -158,11 +172,11 @@ def gptq_llama_func(model, dataloader, dev, args, force_to_cpu=False):
     return quantizers
 
 
-class QuantizedLlamaAttention(nn.Module):
+class QuantizedQwen2Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
     def __init__(
         self,
-        config: LlamaConfig,
+        config: Qwen2Config,
         quant_config: Dict[str, str],
         layer_idx: Optional[int] = None
     ):
@@ -199,12 +213,12 @@ class QuantizedLlamaAttention(nn.Module):
         self.v_proj = QuantLinear(wbits, group_size, self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
         self.o_proj = QuantLinear(wbits, group_size, self.num_heads * self.head_dim, self.hidden_size, bias=False)
 
-        self.rotary_emb = LlamaRotaryEmbedding(config=self.config)
+        self.rotary_emb = Qwen2RotaryEmbedding(config=self.config)
 
-    forward = LlamaAttention.forward
+    forward = Qwen2Attention.forward
 
-class QuantizedLlamaMLP(nn.Module):
-    def __init__(self, config: LlamaConfig, quant_config: Dict[str, str]):
+class QuantizedQwen2MLP(nn.Module):
+    def __init__(self, config: Qwen2Config, quant_config: Dict[str, str]):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -216,60 +230,60 @@ class QuantizedLlamaMLP(nn.Module):
         self.down_proj = QuantLinear(wbits, group_size, self.intermediate_size, self.hidden_size, bias=False)
         self.act_fn = ACT2FN[config.hidden_act]
     
-    forward = LlamaMLP.forward
+    forward = Qwen2MLP.forward
 
     
-class QuantizedLlamaDecoderLayer(nn.Module):
-    def __init__(self, config: LlamaConfig, quant_config: Dict[str, str], layer_idx: int):
+class QuantizedQwen2DecoderLayer(nn.Module):
+    def __init__(self, config: Qwen2Config, quant_config: Dict[str, str], layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
-        # only support LlamaAttention for now. TODO: support LlamaFlashAttention2 and LlamaSdpaAttention
-        self.self_attn = QuantizedLlamaAttention(config, quant_config, layer_idx)
-        self.mlp = QuantizedLlamaMLP(config, quant_config)
-        self.input_layernorm = LlamaRMSNorm(self.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = LlamaRMSNorm(self.hidden_size, eps=config.rms_norm_eps)
+        # only support Qwen2Attention for now. TODO: support Qwen2FlashAttention2 and Qwen2SdpaAttention
+        self.self_attn = QuantizedQwen2Attention(config, quant_config, layer_idx)
+        self.mlp = QuantizedQwen2MLP(config, quant_config)
+        self.input_layernorm = Qwen2RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = Qwen2RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
 
-    forward = LlamaDecoderLayer.forward
+    forward = Qwen2DecoderLayer.forward
 
     
-class QuantizedLlamaModel(LlamaPreTrainedModel):
-    def __init__(self, config: LlamaConfig, quant_config: Dict[str, str]):
+class QuantizedQwen2Model(Qwen2PreTrainedModel):
+    def __init__(self, config: Qwen2Config, quant_config: Dict[str, str]):
         super().__init__(config)
         self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([QuantizedLlamaDecoderLayer(config, quant_config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList([QuantizedQwen2DecoderLayer(config, quant_config, layer_idx) for layer_idx in range(config.num_hidden_layers)])
         self._use_sdpa = config._attn_implementation == "sdpa"
         self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
-        self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
         self.post_init()
 
-    get_input_embeddings = LlamaModel.get_input_embeddings
-    set_input_embeddings = LlamaModel.set_input_embeddings
-    forward = LlamaModel.forward
+    get_input_embeddings = Qwen2Model.get_input_embeddings
+    set_input_embeddings = Qwen2Model.set_input_embeddings
+    forward = Qwen2Model.forward
     
 
-class QuantizedLlamaForCausalLM(LlamaPreTrainedModel):
+class QuantizedQwen2ForCausalLM(Qwen2PreTrainedModel):
     def __init__(self, config, quant_config):
         super().__init__(config)
         self.config = config
         self.vocab_size = config.vocab_size
-        self.model = QuantizedLlamaModel(config, quant_config)
+        self.model = QuantizedQwen2Model(config, quant_config)
         # no need to quant
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         # Initialize weights and apply final processing
         self.post_init()
 
-    get_input_embeddings = LlamaForCausalLM.get_input_embeddings
-    set_input_embeddings = LlamaForCausalLM.set_input_embeddings
-    get_output_embeddings = LlamaForCausalLM.get_output_embeddings
-    set_output_embeddings = LlamaForCausalLM.set_output_embeddings
-    set_decoder = LlamaForCausalLM.set_decoder
-    get_decoder = LlamaForCausalLM.get_decoder
-    forward = LlamaForCausalLM.forward
-    prepare_inputs_for_generation = LlamaForCausalLM.prepare_inputs_for_generation
-    _reorder_cache = LlamaForCausalLM._reorder_cache  
+    get_input_embeddings = Qwen2ForCausalLM.get_input_embeddings
+    set_input_embeddings = Qwen2ForCausalLM.set_input_embeddings
+    get_output_embeddings = Qwen2ForCausalLM.get_output_embeddings
+    set_output_embeddings = Qwen2ForCausalLM.set_output_embeddings
+    set_decoder = Qwen2ForCausalLM.set_decoder
+    get_decoder = Qwen2ForCausalLM.get_decoder
+    forward = Qwen2ForCausalLM.forward
+    prepare_inputs_for_generation = Qwen2ForCausalLM.prepare_inputs_for_generation
+    _reorder_cache = Qwen2ForCausalLM._reorder_cache  
 

@@ -4,11 +4,11 @@ import torch
 import random
 
 
-def get_pile(nsamples, seed, seqlen, model):
+def get_pile(name, nsamples, seed, seqlen, model):
     print("get_pile")
     traindata = load_dataset(
         "json",
-        data_files="/mnt/dolphinfs/hdd_pool/docker/share/1/zhangying/datasets/pile/val.jsonl.zst",
+        data_files=name,
         split="train",
     )
 
@@ -183,7 +183,7 @@ def get_loaders(
     if "wikitext2" in name:
         return get_wikitext2(nsamples, seed, seqlen, model)
     if "pile" in name:
-        return get_pile(nsamples, seed, seqlen, model)
+        return get_pile(name, nsamples, seed, seqlen, model)
     if "ptb" in name:
         if "new" in name:
             return get_ptb_new(nsamples, seed, seqlen, model)

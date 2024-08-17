@@ -9,6 +9,8 @@ from accelerate.big_modeling import dispatch_model, infer_auto_device_map, get_b
 _MODEL_TYPE = {
     "LlamaForCausalLM": "llama",
     "LLaMAForCausalLM": "llama",
+    "Qwen2ForCausalLM": "qwen2",
+    "QWen2ForCausalLM": "qwen2",
 }
 
 
